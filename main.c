@@ -196,7 +196,7 @@ void controlUnit(uint32_t binary){
         decExeReg.AluOp = 10;
 
         if(!(SLT_FUNCT ^ funct)) printf("slt instruction\n");
-        if(!(SLT_FUNCT ^ funct)) printf("sll instruction\n");
+        if(!(SLL_FUNCT ^ funct)) printf("sll instruction\n");
     }
 
     // I-type
@@ -436,9 +436,6 @@ void writeBackStage(uint32_t *pc){
             fileReg[31] = writeData;
         else
             fileReg[memWriteReg.rd] = writeData;
-
-    if(memWriteReg.jalSig)
-        fileReg[31] = *pc;
 }
 
 void printDMem(){
