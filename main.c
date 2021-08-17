@@ -4,6 +4,19 @@
 #include <stdint.h>
 #include <stdbool.h>
 
+#define RTYPE_OP 0b00000000
+#define LW_OP 0b00100011
+#define SW_OP 0b00101011
+#define ADDI_OP 0b00001000
+#define BEQ_OP 0b00000100
+#define BNQ_OP 0b00000101
+#define J_OP 0b00000010
+#define JAL_OP 0b00000011
+
+#define JR_FUNCT 0b00001000
+#define SLT_FUNCT 0b00101010
+#define SLL_FUNCT 0b00000000
+
 #define IMEM_SIZE 4
 #define DMEM_SIZE 100
 #define MISP_REG_MAX 32
@@ -164,8 +177,8 @@ void controlUnit(uint32_t binary){
     unsigned char funct = 0x3F & binary;
     printf("OPCODE %u | FUNCT %u\n", opcode, funct);
 
-    // jr
-    if(!(0b00001000 ^ funct)){
+    // jr (R-type)
+    if(!(JR_FUNCT ^ funct)){
         printf("jr instruction\n");
         decExeReg.jrSig = 1;
         decExeReg.jumpSig = 1;
@@ -176,14 +189,14 @@ void controlUnit(uint32_t binary){
     }
     
     // any other R-type
-    else if(!(0b00000000 ^ opcode)){
+    else if(!(RTYPE_OP ^ opcode)){
         printf("any arithmetic r-type instruction\n");
         decExeReg.RegWrite = 1;
         decExeReg.RegDst = 1;
         decExeReg.AluOp = 10;
 
-        if(!(0b00101010 ^ funct)) printf("slt instruction\n");
-        if(!(0b00000000 ^ funct)) printf("sll instruction\n");
+        if(!(SLT_FUNCT ^ funct)) printf("slt instruction\n");
+        if(!(SLT_FUNCT ^ funct)) printf("sll instruction\n");
     }
 
     // I-type
@@ -192,7 +205,7 @@ void controlUnit(uint32_t binary){
         decExeReg.ALUSrc = 1;
 
         // lw
-        if(!(0b00100011 ^ opcode)){
+        if(!(LW_OP ^ opcode)){
             printf("lw instruction\n");
             decExeReg.RegWrite = 1;
             decExeReg.MemToReg = 1;
@@ -201,7 +214,7 @@ void controlUnit(uint32_t binary){
         }
 
         // sw
-        if(!(0b00101011 ^ opcode)){
+        if(!(SW_OP ^ opcode)){
             printf("sw instruction\n");
             decExeReg.RegWrite = 0;
             decExeReg.MemToReg = 0;
@@ -209,7 +222,7 @@ void controlUnit(uint32_t binary){
         }
 
         // addi
-        if(!(0b00001000 ^ opcode)){
+        if(!(ADDI_OP ^ opcode)){
             printf("addi instruction\n");
             decExeReg.RegWrite = 1;
             decExeReg.MemToReg = 0;
@@ -218,7 +231,7 @@ void controlUnit(uint32_t binary){
         }
 
         // beq 
-        if(!(0b00000100 ^ opcode)){
+        if(!(BEQ_OP ^ opcode)){
             printf("beq instruction\n");
             decExeReg.ALUSrc = 0;
             decExeReg.AluOp = 2;
@@ -226,7 +239,7 @@ void controlUnit(uint32_t binary){
         }
 
         // bnq
-        if(!(0b00000101 ^ opcode)){
+        if(!(BNQ_OP ^ opcode)){
             printf("bne instruction");
             decExeReg.ALUSrc = 0;
             decExeReg.AluOp = 3;
@@ -235,14 +248,14 @@ void controlUnit(uint32_t binary){
     }
 
     // J-type
-    if(!(0b00000010 ^ opcode)){
+    if(!(J_OP ^ opcode)){
         printf("j instruction\n");
         decExeReg.jumpSig = 1;
         decExeReg.branchSig = 0;
         decExeReg.branchDiffSig = 0;
     }
 
-    if(!(0b00000011 ^ opcode)){
+    if(!(JAL_OP ^ opcode)){
         printf("jal instruction\n");
         decExeReg.jalSig = 1;
         decExeReg.jumpSig = 1;
@@ -419,7 +432,10 @@ void writeBackStage(uint32_t *pc){
         writeData = memWriteReg.ALURes;
 
     if(memWriteReg.RegWrite)
-        fileReg[memWriteReg.rd] = writeData;
+        if(memWriteReg.jalSig)
+            fileReg[31] = writeData;
+        else
+            fileReg[memWriteReg.rd] = writeData;
 
     if(memWriteReg.jalSig)
         fileReg[31] = *pc;
