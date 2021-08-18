@@ -109,7 +109,6 @@ void storeWord(uint32_t word, int *index){
         return;
     }
 
-    printf("Armazenando %u\n", word);
     IMem[(*index)++] = word;
 }
 
@@ -126,7 +125,6 @@ int readInstructions(char *filename){
     while(fscanf(fp, "%s", buffer) != EOF)
         storeWord(binaryToDecimal(buffer), &countInst);
     
-    printf("Contagem de instruções: %d\n", countInst);
     return countInst;
 }
 
@@ -138,8 +136,7 @@ bool fetchStage(int qtdInstr, uint32_t *inst, int *pc){
 
        fetDecReg.next = *pc;
        fetDecReg.inst = *inst;
-
-       printf("Processando instrução: %u\n", *inst);
+        
        return true;
     }
 
