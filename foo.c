@@ -160,10 +160,6 @@ void controlUnit(uint32_t binary){
     if(!(JR_FUNCT ^ funct)){
         printf("jr instruction\n");
         decExeReg.jrSig = 1;
-        decExeReg.jumpSig = 0;
-        decExeReg.jalSig = 0;
-        decExeReg.branchSig = 0;
-        decExeReg.branchDiffSig = 0;
         decExeReg.RegWrite = 0;
         decExeReg.RegDst = 0;
         decExeReg.MemWrite = 0;
@@ -251,19 +247,11 @@ void controlUnit(uint32_t binary){
     if(!(J_OP ^ opcode)){
         printf("j instruction\n");
         decExeReg.jumpSig = 1;
-        decExeReg.jrSig = 0;
-        decExeReg.jalSig = 0;
-        decExeReg.branchSig = 0;
-        decExeReg.branchDiffSig = 0;
     }
 
     if(!(JAL_OP ^ opcode)){
         printf("jal instruction\n");
         decExeReg.jalSig = 1;
-        decExeReg.jrSig = 0;
-        decExeReg.jumpSig = 0;
-        decExeReg.branchSig = 0;
-        decExeReg.branchDiffSig = 0;
     }
 
     printf("\n");
