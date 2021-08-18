@@ -9,7 +9,7 @@
 #define SW_OP 0b00101011
 #define ADDI_OP 0b00001000
 #define BEQ_OP 0b00000100
-#define BNQ_OP 0b00000101
+#define BNE_OP 0b00000101
 #define J_OP 0b00000010
 #define JAL_OP 0b00000011
 
@@ -17,8 +17,8 @@
 #define SLT_FUNCT 0b00101010
 #define SLL_FUNCT 0b00000000
 
-#define IMEM_SIZE 4
-#define DMEM_SIZE 100
+#define IMEM_SIZE 32
+#define DMEM_SIZE 512
 #define MISP_REG_MAX 32
 
 typedef struct {
@@ -28,8 +28,8 @@ typedef struct {
 
 typedef struct {
     int next;
-    uint32_t rsCont;
-    uint32_t rtCont;
+    int rsCont;
+    int rtCont;
     uint32_t signExtend;
     uint32_t jumpAddr;
     unsigned char rd1; 
@@ -55,7 +55,7 @@ typedef struct {
     int next;
     uint32_t branchAddress;
     int ALURes;
-    uint32_t rtCont;
+    int rtCont;
     unsigned char rd;
 
     // Signals
@@ -73,7 +73,7 @@ typedef struct {
 
 typedef struct {
     int ALURes;
-    uint32_t readData;
+    int readData;
     unsigned char rd;
 
     // Signals
@@ -88,7 +88,7 @@ IFIDReg fetDecReg;
 unsigned char fileReg[MISP_REG_MAX];
 IDEXReg decExeReg = { 0 };
 EXMEMReg exeMemReg;
-uint32_t DMem[DMEM_SIZE];
+int DMem[DMEM_SIZE];
 MEMWBReg memWriteReg;
 
 uint32_t binaryToDecimal(char *bin){
@@ -103,37 +103,14 @@ uint32_t binaryToDecimal(char *bin){
     return dec;
 }
 
-// Indo de most significant -> less significant (para debug)
-void printBits(uint32_t word){
-    printf("Imprimindo os bits de %u\n", word);
-
-    unsigned int size = sizeof(uint32_t);
-    int i;
-    for(i = size*8-1; i>=0; i--){
-        printf("%u",(word >>i) & 1 );
-    }
-
-    printf("\n");
-}
-
-void storeWord(uint32_t word, int index){
-    if(index >= 4){
+void storeWord(uint32_t word, int *index){
+    if(*index >= IMEM_SIZE){
         printf("Memória de instruções lotada\n");
         return;
     }
 
     printf("Armazenando %u\n", word);
-    IMem[index] = word;
-}
-
-void printIMem(){
-    void *ptr = IMem;
-
-    printf("Iniciando impressão de MEMORIA DE INSTRUÇÔES\n");
-    for(int i=0; i<IMEM_SIZE; i++){
-        printf("address %d -> %u\n", i * 4, *(int *)ptr);
-        ptr = ptr + 4;
-    }
+    IMem[(*index)++] = word;
 }
 
 int readInstructions(char *filename){
@@ -146,19 +123,16 @@ int readInstructions(char *filename){
         exit(EXIT_FAILURE);
     }
 
-    while(fscanf(fp, "%s", buffer) != EOF){
-        storeWord(binaryToDecimal(buffer), countInst);
-        countInst++;
-    }
+    while(fscanf(fp, "%s", buffer) != EOF)
+        storeWord(binaryToDecimal(buffer), &countInst);
     
+    printf("Contagem de instruções: %d\n", countInst);
     return countInst;
 }
 
-// true means we succesufly fetched a new instruction
-// otherwise, we return false
 bool fetchStage(int qtdInstr, uint32_t *inst, int *pc){
     if(*pc < qtdInstr){
-        printf("Instruction adress: %d\n", *pc);
+        printf("Instruction adress (PC): %d\n", *pc);
         *inst = IMem[*pc];
         *pc = *pc + 1;
 
@@ -172,6 +146,14 @@ bool fetchStage(int qtdInstr, uint32_t *inst, int *pc){
     return false;
 }
 
+void disableBranchs(){
+    decExeReg.branchSig = 0;
+    decExeReg.branchDiffSig = 0;
+    decExeReg.jrSig = 0;
+    decExeReg.jalSig = 0;
+    decExeReg.jumpSig = 0;
+}
+
 void controlUnit(uint32_t binary){
     unsigned char opcode = 0xFF & (binary >> 26);
     unsigned char funct = 0x3F & binary;
@@ -182,7 +164,8 @@ void controlUnit(uint32_t binary){
         printf("jr instruction\n");
         decExeReg.jrSig = 1;
         decExeReg.jumpSig = 1;
-        decExeReg.branchSig = decExeReg.branchDiffSig = 0;
+        decExeReg.branchSig = 0;
+        decExeReg.branchDiffSig = 0;
         decExeReg.RegWrite = 0;
         decExeReg.RegDst = 0;
         decExeReg.MemWrite = 0;
@@ -191,9 +174,14 @@ void controlUnit(uint32_t binary){
     // any other R-type
     else if(!(RTYPE_OP ^ opcode)){
         printf("any arithmetic r-type instruction\n");
+        decExeReg.MemWrite = 0;
         decExeReg.RegWrite = 1;
         decExeReg.RegDst = 1;
         decExeReg.AluOp = 10;
+        decExeReg.MemRead = 0;
+        decExeReg.MemWrite = 0;
+        decExeReg.MemToReg = 0;
+        disableBranchs();
 
         if(!(SLT_FUNCT ^ funct)) printf("slt instruction\n");
         if(!(SLL_FUNCT ^ funct)) printf("sll instruction\n");
@@ -202,28 +190,36 @@ void controlUnit(uint32_t binary){
     // I-type
     if(opcode > 3){
         decExeReg.AluOp = 0;
-        decExeReg.ALUSrc = 1;
 
         // lw
         if(!(LW_OP ^ opcode)){
             printf("lw instruction\n");
+            decExeReg.RegDst = 0;
+            decExeReg.AluOp = 0;
+            decExeReg.ALUSrc = 1;
+            decExeReg.MemRead = 1;
+            decExeReg.MemWrite = 0;
             decExeReg.RegWrite = 1;
             decExeReg.MemToReg = 1;
-            decExeReg.MemRead = 1;
-            decExeReg.RegDst = 1;
+            disableBranchs();
         }
 
         // sw
         if(!(SW_OP ^ opcode)){
             printf("sw instruction\n");
-            decExeReg.RegWrite = 0;
-            decExeReg.MemToReg = 0;
+            decExeReg.AluOp = 0;
+            decExeReg.ALUSrc = 1;
+            decExeReg.MemRead = 0;
             decExeReg.MemWrite = 1;
+            decExeReg.RegWrite = 0;
+            disableBranchs();
         }
 
         // addi
         if(!(ADDI_OP ^ opcode)){
             printf("addi instruction\n");
+            decExeReg.AluOp = 0;
+            decExeReg.ALUSrc = 1;
             decExeReg.RegWrite = 1;
             decExeReg.MemToReg = 0;
             decExeReg.MemWrite = 0;
@@ -233,17 +229,23 @@ void controlUnit(uint32_t binary){
         // beq 
         if(!(BEQ_OP ^ opcode)){
             printf("beq instruction\n");
-            decExeReg.ALUSrc = 0;
             decExeReg.AluOp = 2;
+            decExeReg.ALUSrc = 0;
             decExeReg.branchSig = 1;
+            decExeReg.MemRead = 0;
+            decExeReg.MemWrite = 0;
+            decExeReg.RegWrite = 0;
         }
 
-        // bnq
-        if(!(BNQ_OP ^ opcode)){
-            printf("bne instruction");
+        // bne
+        if(!(BNE_OP ^ opcode)){
+            printf("bne instructions\n");
+            decExeReg.AluOp = 2;
             decExeReg.ALUSrc = 0;
-            decExeReg.AluOp = 3;
             decExeReg.branchDiffSig = 1;
+            decExeReg.MemRead = 0;
+            decExeReg.MemWrite = 0;
+            decExeReg.RegWrite = 0;
         }
     }
 
@@ -262,11 +264,13 @@ void controlUnit(uint32_t binary){
         decExeReg.branchSig = 0;
         decExeReg.branchDiffSig = 0;
     }
+
+    printf("\n");
 }
 
 void decodeStage(){
-    printf("==================================\n");
-    printf("Decodificando %u\n", fetDecReg.inst);
+    printf("----------------------------------\n");
+    printf("Decode Stage: %u\n", fetDecReg.inst);
 
     uint32_t inst = fetDecReg.inst;
     controlUnit(inst);
@@ -286,7 +290,7 @@ void decodeStage(){
     printf("rd2: %u [15:11]\n", 0x1F & (inst >> 11));
     printf("shamt: %u [10:6]\n", 0x1F & (inst >> 6));
     printf("signExtend: %u\n", 0x0000FFFF & inst);
-    printf("(pc + 4 = %d) jumpAddr: %u\n", fetDecReg.next, decExeReg.jumpAddr);
+    printf("jumpAddr: %u\n", decExeReg.jumpAddr);
 }
 
 int ALUControl(){
@@ -303,7 +307,7 @@ int ALUControl(){
                 case 36: return 22;
                 case 37: return 23;
                 case 42: return 24;
-                case 0: return 25;
+                case 0 : return 25;
             }
        }
        case 2: return 7;
@@ -359,8 +363,9 @@ uint32_t obtainBranchAddress(){
 }
 
 void executeStage(){
-    int ALURes = ALU();
+    printf("Execute Stage\n\n");
 
+    int ALURes = ALU();
     printf("ALURES: %d\n", ALURes);
 
     if(ALURes == 0)
@@ -389,6 +394,8 @@ void executeStage(){
 }
 
 void memoryStage(uint32_t *pc){
+    printf("Memory stage\n\n");
+
     int writeData = exeMemReg.rtCont;
     int adress = exeMemReg.ALURes / 4;
 
@@ -424,6 +431,8 @@ void memoryStage(uint32_t *pc){
 }
 
 void writeBackStage(uint32_t *pc){
+    printf("WriteBack stage\n");
+
     int writeData;
 
     if(memWriteReg.MemToReg)
@@ -438,16 +447,55 @@ void writeBackStage(uint32_t *pc){
             fileReg[memWriteReg.rd] = writeData;
 }
 
-void printDMem(){
-    printf("Imprimindo DMem\n");
+void printDMem(FILE *fp){
+    fprintf(fp, "$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$\nImprimindo DMem\n");
     for(int i=0; i<DMEM_SIZE; i++)
-        printf("%i -> %u\n", i, DMem[i]);
+        fprintf(fp, "%i -> %u\n", i, DMem[i]);
+    fprintf(fp, "$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$\n");
+}
+
+void outputSignalsExe(FILE *fp){
+    fprintf(fp, "Output signals Execution Stage\n");
+    fprintf(fp, "RegWrite: %d\n", decExeReg.RegWrite);
+    fprintf(fp, "ALUSrc: %d\n", decExeReg.ALUSrc);
+    fprintf(fp, "AluOp: %d\n", decExeReg.AluOp);
+    fprintf(fp, "RegDst: %d\n", decExeReg.RegDst);
+    fprintf(fp, "MemWrite: %d\n", decExeReg.MemWrite);
+    fprintf(fp, "MemRead: %d\n", decExeReg.MemRead);
+    fprintf(fp, "MemToReg: %d\n", decExeReg.MemToReg);
+    fprintf(fp, "branchSig: %d\n", decExeReg.branchSig);
+    fprintf(fp, "branchDiffSig: %d\n", decExeReg.branchDiffSig);
+    fprintf(fp, "jumpSig: %d\n", decExeReg.jumpSig);
+    fprintf(fp, "jalSig: %d\n", decExeReg.jalSig);
+    fprintf(fp, "jrSig: %d\n\n", decExeReg.jrSig);
+}
+
+void outputSignalsMem(FILE *fp){
+    fprintf(fp, "Output signals Memory Stage\n");
+    fprintf(fp, "RegWrite: %d\n", exeMemReg.RegWrite);
+    fprintf(fp, "zero: %d\n", exeMemReg.zero);
+    fprintf(fp, "MemWrite: %d\n", exeMemReg.MemWrite);
+    fprintf(fp, "MemRead: %d\n", exeMemReg.MemRead);
+    fprintf(fp, "MemToReg: %d\n", exeMemReg.MemToReg);
+    fprintf(fp, "branchSig: %d\n", exeMemReg.branchSig);
+    fprintf(fp, "branchDiffSig: %d\n", exeMemReg.branchDiffSig);
+    fprintf(fp, "jumpSig: %d\n", exeMemReg.jumpSig);
+    fprintf(fp, "jalSig: %d\n", exeMemReg.jalSig);
+    fprintf(fp, "jrSig: %d\n\n", exeMemReg.jrSig);
+}
+
+void outputSignalsWB(FILE *fp){
+    fprintf(fp, "Output signals Write Back Stage\n");
+    fprintf(fp, "RegWrite: %d\n", memWriteReg.RegWrite);
+    fprintf(fp, "MemToReg: %d\n", memWriteReg.MemToReg);
+    fprintf(fp, "jalSig: %d\n\n", memWriteReg.jalSig);
 }
 
 void printfileReg(){
-    printf("Imprimindo fileReg\n");
+    printf("**********************************\nImprimindo fileReg\n");
     for(int i=0; i<MISP_REG_MAX; i++)
         printf("%i -> %u\n", i, fileReg[i]);
+    printf("**********************************\n");
 }
 
 void setPC(int *pc){
@@ -456,32 +504,64 @@ void setPC(int *pc){
         *pc = exeMemReg.branchAddress;
     }
     else{
-        printf("new PC: PC + 1\n");
+        printf("new PC: PC + 1 = %u\n", *pc);
         *pc = *pc;
     }
+
+    printf("================================================\n");
 }
 
-void runPipeline(int qtdInstr){
+void hold(){
+    char c;
+    scanf(" %c", &c);
+    
+    while(c != 's')
+        scanf(" %c", &c);
+}
+
+void runPipeline(FILE *fp, int qtdInstr, int step){
     int pc = 0;
     int inst;
 
-    for(int i=0; i<MISP_REG_MAX; i++)
-        fileReg[i] = i*10;
-
-    while(1){
-        if(fetchStage(qtdInstr, &inst, &pc)){
-            decodeStage();
-            executeStage();
-            memoryStage(&pc);
-            writeBackStage(&pc);
-        }
-        else break;
+    while(fetchStage(qtdInstr, &inst, &pc)){
+        decodeStage();
+        if(step) hold();
+        executeStage();
+        outputSignalsExe(fp);
+        if(step) hold();
+        memoryStage(&pc);
+        outputSignalsMem(fp);
+        if(step) hold();
+        writeBackStage(&pc);
+        outputSignalsWB(fp);
+        printfileReg();
+        printDMem(fp);
         setPC(&pc);
+        if(step) hold();
     }
 }
 
-int main(){
-    runPipeline(readInstructions("input.pipe"));
-    
+void setupRegisters(){
+    for(int i=0; i<MISP_REG_MAX; i++) fileReg[i] = 0;
+    for(int i=0; i<IMEM_SIZE; i++) IMem[i] = 0;
+    for(int i=0; i<DMEM_SIZE; i++) DMem[i] = 0;
+}
+
+int getOption(){
+    int opt;
+
+    printf("Escolha o modo de exibição\n");
+    printf("Digite (0) para execução rapida\n");
+    printf("Digita (1) para passo a passo\n");
+    scanf("%d", &opt);
+
+    return opt;
+}
+
+int main(int argc, char *argv[]){
+    FILE *out = fopen("sigmemory-log.txt", "w+");
+    setupRegisters();
+    runPipeline(out, readInstructions(argv[1]), getOption());
+    fclose(out);
     return EXIT_SUCCESS;
 }
