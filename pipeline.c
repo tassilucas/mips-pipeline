@@ -3,6 +3,7 @@
 #include <stdbool.h>
 #include <math.h>
 #include <stdint.h>
+#include <string.h>
 
 #define RTYPE_OP 0b00000000
 #define LW_OP 0b00100011
@@ -58,7 +59,6 @@ typedef struct {
     uint32_t branchAddress;
     int ALURes;
     int rtCont;
-    int rtDataH;
     unsigned char rd;
 
     // Signals
@@ -85,7 +85,6 @@ typedef struct {
     int jalSig;
 } MEMWBReg;
 
-int PC;
 uint32_t IMem[IMEM_SIZE];
 IFIDReg fetDecRegLeft = { 0 }, fetDecRegRight = { 0 };
 int fileReg[MISP_REG_MAX];
@@ -97,9 +96,12 @@ MEMWBReg memWriteRegLeft = { 0 }, memWriteRegRight = { 0 };
 int stallSignal = 0;
 int IFIDWrite = 1;
 int PCWrite = 1;
-
 int ForwardA = 0;
 int ForwardB = 0;
+
+int PC;
+int clockCycle = 0;
+uint32_t instEXE, instMEM, instWB;
 
 uint32_t binaryToDecimal(char *bin){
     uint32_t dec = 0, res;
@@ -123,18 +125,22 @@ void storeWord(uint32_t word, int *index){
     IMem[(*index)++] = word;
 }
 
-int readInstructions(char *filename){
-    FILE *fp = fopen(filename, "r");
+int readInstructions(FILE *fp){
     char buffer[33] = {0};
     int countInst = 0;
 
-    if(!fp){
-        printf("Error to open %s file\n", filename);
-        exit(EXIT_FAILURE);
+    if(fp){
+        printf("Lendo input via arquivo\n");
+        while(fscanf(fp, "%s", buffer) != EOF)
+            storeWord(binaryToDecimal(buffer), &countInst);
     }
-
-    while(fscanf(fp, "%s", buffer) != EOF)
-        storeWord(binaryToDecimal(buffer), &countInst);
+    else{
+        printf("Digite as instruções\n");
+        do{
+            scanf("%s", buffer);
+            storeWord(binaryToDecimal(buffer), &countInst);
+        }while(strcmp(buffer, "run"));
+    }
     
     printf("Contagem de instruções: %d\n", countInst);
     return countInst;
@@ -149,6 +155,7 @@ void disableBranchs(){
 }
 
 void stallPipeline(){
+    stallSignal = 0;
     IFIDWrite = 0;
     PCWrite = 0;
     decExeRegLeft.RegWrite = 0;
@@ -167,8 +174,10 @@ void stallPipeline(){
 }
 
 void controlUnit(uint32_t binary){
-    if(stallSignal)
+    if(stallSignal){
         stallPipeline();
+        return;
+    }
 
     unsigned char opcode = 0xFF & (binary >> 26);
     unsigned char funct = 0x3F & binary;
@@ -238,6 +247,7 @@ void controlUnit(uint32_t binary){
             decExeRegLeft.MemToReg = 0;
             decExeRegLeft.MemWrite = 0;
             decExeRegLeft.RegDst = 0;
+            disableBranchs();
         }
 
         // beq 
@@ -286,7 +296,7 @@ void controlUnit(uint32_t binary){
         decExeRegLeft.branchDiffSig = 0;
         decExeRegLeft.MemRead = 0;
         decExeRegLeft.MemWrite = 0;
-        decExeRegLeft.RegWrite = 0;
+        decExeRegLeft.RegWrite = 1;
     }
 
     printf("\n");
@@ -294,14 +304,9 @@ void controlUnit(uint32_t binary){
 
 void writeBackStage(){
     printf("----------------------------------\n");
-    printf("WriteBack stage\n");
+    printf("WriteBack stage: %u\n", instWB);
 
-    int writeData;
-
-    if(memWriteRegRight.MemToReg)
-        writeData = memWriteRegRight.readData;
-    else
-        writeData = memWriteRegRight.ALURes;
+    int writeData = memWriteRegRight.MemToReg ? memWriteRegRight.readData : memWriteRegRight.ALURes;
 
     if(memWriteRegRight.RegWrite)
         if(memWriteRegRight.jalSig)
@@ -312,7 +317,7 @@ void writeBackStage(){
 
 void memoryStage(){
     printf("----------------------------------\n");
-    printf("Memory stage\n\n");
+    printf("Memory stage: %u\n\n", instMEM);
 
     int writeData = exeMemRegRight.rtCont;
     int adress = exeMemRegRight.ALURes / 4;
@@ -334,6 +339,8 @@ void memoryStage(){
     memWriteRegLeft.MemToReg = exeMemRegRight.MemToReg;
     memWriteRegLeft.RegWrite = exeMemRegRight.RegWrite;
 
+    instWB = instMEM;
+
     printf("ALUResult after multiplexor: %d\n", memWriteRegLeft.ALURes);
 }
 
@@ -343,6 +350,8 @@ void hazardDetectionUnit(uint32_t inst){
 
     if(((rs == decExeRegRight.rd1) || (rt == decExeRegRight.rd1)))
         stallSignal = 1;
+
+    printf("STALL PIPELINE DETECTADO\n");
 }
 
 void decodeStage(){
@@ -366,11 +375,13 @@ void decodeStage(){
 
     printf("rs: %u\n", 0x1F & (inst >> 21));
     printf("rt: %u\n", 0x1F & (inst >> 16));
-    printf("rd1: %u [20:16]\n", 0x1F & (inst >> 16));
-    printf("rd2: %u [15:11]\n", 0x1F & (inst >> 11));
+    printf("rd1 (rt): %u [20:16]\n", 0x1F & (inst >> 16));
+    printf("rd2 (rd): %u [15:11]\n", 0x1F & (inst >> 11));
     printf("shamt: %u [10:6]\n", 0x1F & (inst >> 6));
     printf("signExtend: %u\n", 0x0000FFFF & inst);
     printf("(pc + 1 = %d) jumpAddr: %u\n", decExeRegRight.next, decExeRegRight.jumpAddr);
+
+    instEXE = inst;
 }
 
 int ALUControl(){
@@ -395,21 +406,33 @@ int ALUControl(){
 }
 
 int firstOperand(){
-    if(ForwardA == 1)
+    if(ForwardA == 1){
+        printf("ForwardA = %d\n", ForwardA);
         return exeMemRegRight.ALURes;
-    else if(ForwardA == 2)
-        return memWriteRegRight.rd;
-    else
+    }
+    else if(ForwardA == 2){
+        printf("ForwardA = %d\n", ForwardA);
+        return (memWriteRegRight.MemToReg ? memWriteRegRight.readData : memWriteRegRight.ALURes);
+    }
+    else{
+        printf("ForwardA = %d\n", ForwardA);
         return decExeRegRight.rsCont;
+    }
 }
 
 int secondOperand(){
-    if(ForwardB == 1)
+    if(ForwardB == 1){
+        printf("ForwardB = %d\n", ForwardB);
         return exeMemRegRight.ALURes;
-    else if(ForwardB == 2)
-        return memWriteRegRight.rd;
-    else
-        return decExeRegRight.rsCont;
+    }
+    else if(ForwardB == 2){
+        printf("ForwardB = %d\n", ForwardB);
+        return (memWriteRegRight.MemToReg ? memWriteRegRight.readData : memWriteRegRight.ALURes);
+    }
+    else{
+        printf("ForwardB = %d\n", ForwardB);
+        return decExeRegRight.rtCont;
+    }
 }
 
 int ALU(){
@@ -419,6 +442,9 @@ int ALU(){
     int first = firstOperand();
     int second = secondOperand();
     exeMemRegLeft.rtCont = second;
+
+    printf("FIRST OPERANDO: %d\n", first);
+    printf("SECOND OPERANDO: %d\n", second);
 
     switch(ALUInput){
         case 0:  r = first + decExeRegRight.signExtend;
@@ -464,56 +490,53 @@ uint32_t obtainBranchAddress(){
 }
 
 void forwardingUnit(){
-    // Forwarding de resultado em memoryStage
+    ForwardA = ForwardB = 0;
+
     if((exeMemRegRight.RegWrite)
             && (exeMemRegRight.rd != 0)
             && (exeMemRegRight.rd == decExeRegRight.rs))
-        ForwardA = 1;
+        ForwardA = 1; // 10
+
     if((exeMemRegRight.RegWrite)
             && (exeMemRegRight.rd != 0)
             && (exeMemRegRight.rd == decExeRegRight.rt))
-        ForwardA = 1;
+        ForwardB = 1;
 
-    // Forwarding de resultado em writeBackStage
     if((memWriteRegRight.RegWrite)
             && (memWriteRegRight.rd != 0)
             && (memWriteRegRight.rd == decExeRegRight.rs))
-        ForwardA = 2;
+        ForwardA = 2; // 01
+
     if((memWriteRegRight.RegWrite)
             && (memWriteRegRight.rd != 0)
             && (memWriteRegRight.rd == decExeRegRight.rt))
         ForwardB = 2;
 
-    // Forwarding de resultado ALU = memoryStage = writeBackStage
     if((memWriteRegRight.RegWrite)
             && (memWriteRegRight.rd != 0)
-            && (exeMemRegRight.rd != decExeRegRight.rs)
+            && !(exeMemRegRight.RegWrite && exeMemRegRight.rd != 0
+                && (exeMemRegRight.rd != decExeRegRight.rs))
             && (memWriteRegRight.rd == decExeRegRight.rs))
-        ForwardA = 2;
+        ForwardA = 2; // 01
+
     if((memWriteRegRight.RegWrite)
             && (memWriteRegRight.rd != 0)
-            && (exeMemRegRight.rd != decExeRegRight.rt)
+            && !(exeMemRegRight.RegWrite && exeMemRegRight.rd != 0
+                && (exeMemRegRight.rd != decExeRegRight.rt))
             && (memWriteRegRight.rd == decExeRegRight.rt))
-        ForwardB = 2;
+        ForwardB = 2; // 01
 }
 
 void executeStage(){
     printf("----------------------------------\n");
-    printf("Execute Stage: DEBUG PC: %d\n\n", decExeRegRight.next);
+    printf("Execute Stage: %u\n\n", instEXE);
 
     forwardingUnit();
     int ALURes = ALU();
     printf("ALURES: %d\n", ALURes);
 
-    if(ALURes == 0)
-        exeMemRegLeft.zero = 1;
-    else
-        exeMemRegLeft.zero = 0;
-
-    if(decExeRegRight.RegDst)
-        exeMemRegLeft.rd = decExeRegRight.rd2;
-    else
-        exeMemRegLeft.rd = decExeRegRight.rd1;
+    exeMemRegLeft.zero = ALURes == 0 ? 1 : 2;
+    exeMemRegLeft.rd = decExeRegRight.RegDst ? decExeRegRight.rd2 : decExeRegRight.rd1;
 
     exeMemRegLeft.ALURes = ALURes;
     exeMemRegLeft.branchAddress = obtainBranchAddress();
@@ -528,6 +551,8 @@ void executeStage(){
     exeMemRegLeft.jalSig = decExeRegRight.jalSig;
     exeMemRegLeft.jrSig = decExeRegRight.jrSig;
     exeMemRegLeft.next = decExeRegRight.next;
+
+    instMEM = instEXE;
 }
 
 void setPC(){
@@ -541,6 +566,8 @@ void setPC(){
         PC = exeMemRegRight.branchAddress;
     }
     else PC = PC + 1;
+
+    printf("Valor de PC: %d\n", PC);
 }
 
 bool fetchStage(int qtdInstr){
@@ -565,18 +592,25 @@ bool fetchStage(int qtdInstr){
 }
 
 void swapRegs(){
-    printf("SWAPPING REGISTERS\n");
     fetDecRegRight = fetDecRegLeft;
     decExeRegRight = decExeRegLeft;
     exeMemRegRight = exeMemRegLeft;
     memWriteRegRight = memWriteRegLeft;
 }
 
-void printDMem(){
-    printf("$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$\nImprimindo DMem\n");
+void resetMemory(){
+    for(int i=0; i<DMEM_SIZE; i++) DMem[i] = 0;
+}
+
+void resetRegisters(){
+    for(int i=0; i<MISP_REG_MAX; i++) fileReg[i] = 0;
+}
+
+void outputMemory(FILE *out){
+    fprintf(out, "$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$\nImprimindo DMem\n");
     for(int i=0; i<DMEM_SIZE; i++)
-        printf("%i -> %u\n", i, DMem[i]);
-    printf("$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$\n");
+        fprintf(out, "%i -> %u\n", i, DMem[i]);
+    fprintf(out, "$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$\n");
 }
 
 void printfileReg(){
@@ -586,29 +620,169 @@ void printfileReg(){
     printf("**********************************\n");
 }
 
-void runPipeline(int qtdInstr){
+void printSigFetchStage(FILE *out){
+    fprintf(out, "Sinais em fetch stage\n");
+    fprintf(out, "PCWrite: %d\n", PCWrite);
+    fprintf(out, "IFIDWrite: %d\n", IFIDWrite);
+}
+
+void printSigDecStage(FILE *out){
+    fprintf(out, "Sinais em decode stage\n");
+    fprintf(out, "stallSignal: %d\n", stallSignal);
+}
+
+void printSigExeStage(FILE *out){
+    fprintf(out, "Sinais em execute stage\n");
+    fprintf(out, "RegWrite: %d\n", decExeRegRight.RegWrite);
+    fprintf(out, "ALUSrc: %d\n", decExeRegRight.ALUSrc);
+    fprintf(out, "AluOp: %d\n", decExeRegRight.AluOp);
+    fprintf(out, "RegDst: %d\n", decExeRegRight.RegDst);
+    fprintf(out, "MemWrite: %d\n", decExeRegRight.MemWrite);
+    fprintf(out, "MemRead: %d\n", decExeRegRight.MemRead);
+    fprintf(out, "MemToReg: %d\n", decExeRegRight.MemToReg);
+    fprintf(out, "branchSig: %d\n", decExeRegRight.branchSig);
+    fprintf(out, "branchDiffSig: %d\n", decExeRegRight.branchDiffSig);
+    fprintf(out, "jumpSig: %d\n", decExeRegRight.jumpSig);
+    fprintf(out, "jalSig: %d\n", decExeRegRight.jalSig);
+    fprintf(out, "jrSig: %d\n", decExeRegRight.jrSig);
+    fprintf(out, "ForwardA: %d\n", ForwardA);
+    fprintf(out, "ForwardB: %d\n", ForwardB);
+}
+
+void printSigMemStage(FILE *out){
+    fprintf(out, "Sinais em memory stage\n");
+    fprintf(out, "RegWrite: %d\n", exeMemRegRight.RegWrite);
+    fprintf(out, "zero: %d\n", exeMemRegRight.zero);
+    fprintf(out, "branchSig: %d\n", exeMemRegRight.branchSig);
+    fprintf(out, "MemWrite: %d\n", exeMemRegRight.MemWrite);
+    fprintf(out, "MemRead: %d\n", exeMemRegRight.MemRead);
+    fprintf(out, "MemToReg: %d\n", exeMemRegRight.MemToReg);
+    fprintf(out, "branchDiffSig: %d\n", exeMemRegRight.branchDiffSig);
+    fprintf(out, "jumpSig: %d\n", exeMemRegRight.jumpSig);
+    fprintf(out, "jalSig: %d\n", exeMemRegRight.jalSig);
+    fprintf(out, "jrSig: %d\n", exeMemRegRight.jrSig);
+}
+
+void printSigWBStage(FILE *out){
+    fprintf(out, "Sinais em writeback stage\n");
+    fprintf(out, "RegWrite: %d\n", memWriteRegRight.RegWrite);
+    fprintf(out, "RegWrite: %d\n", memWriteRegRight.MemToReg);
+    fprintf(out, "RegWrite: %d\n", memWriteRegRight.jalSig);
+}
+
+void hold(){
+    char c;
+
+    printf("Resetar memoria (m)\n");
+    printf("Resetar registradores (r)\n");
+    printf("Continuar (s)\n");
+
+    scanf(" %c", &c);
+    while(c != 's' && c != 'm' && c != 'r')
+        scanf(" %c", &c);
+
+    if(c == 'm') resetMemory();
+    if(c == 'r') resetRegisters();
+}
+
+void runPipeline(int qtdInstr, int stepMode, FILE *out){
     int inst;
 
     while(fetchStage(qtdInstr)){
+        printf("Clock cycle: %d\n", clockCycle++);
+
+        printSigFetchStage(out);
+        outputMemory(out);
+
         decodeStage();
+        printSigDecStage(out);
+        outputMemory(out);
+        if(stepMode) hold();
+
         executeStage();
+        printSigExeStage(out);
+        outputMemory(out);
+        if(stepMode) hold();
+
         memoryStage();
+        printSigMemStage(out);
+        outputMemory(out);
+        if(stepMode) hold();
+
         writeBackStage();
+        printSigWBStage(out);
+        outputMemory(out);
         printfileReg();
-        printDMem();
+
+        swapRegs();
+        printf("========================================================\n");
+    }
+
+    for(int i=0; i<4; i++){
+        decodeStage();
+        outputMemory(out);
+        if(stepMode) hold();
+
+        executeStage();
+        outputMemory(out);
+        if(stepMode) hold();
+
+        memoryStage();
+        outputMemory(out);
+        if(stepMode) hold();
+
+        writeBackStage();
+        outputMemory(out);
+        printfileReg();
+
         swapRegs();
         printf("========================================================\n");
     }
 }
 
 void setupRegisters(){
-    for(int i=0; i<MISP_REG_MAX; i++) fileReg[i] = 0;
-    for(int i=0; i<IMEM_SIZE; i++) IMem[i] = 0;
-    for(int i=0; i<DMEM_SIZE; i++) DMem[i] = 0;
+    resetRegisters();
+    resetMemory();
+}
+
+int getStepOption(){
+    printf("Execução direta (0)\n");
+    printf("Modo passo a passo (1)\n");
+
+    int stepMode;
+    scanf("%d", &stepMode);
+    while(stepMode != 0 && stepMode != 1)
+        scanf("%d", &stepMode);
+
+    return stepMode;
+}
+
+int getInputOption(){
+    printf("Input via teclado (0)\n");
+    printf("Input via arquivo (1)\n");
+
+    int input;
+    scanf("%d", &input);
+    while(input != 0 && input != 1)
+        scanf("%d", &input);
+
+    return input;
+}
+
+FILE *getFile(){
+    printf("Digite o caminho para o arquivo de input\n");
+    char buffer[256];
+    scanf("%s", buffer);
+
+    return fopen(buffer, "r");
 }
 
 int main(int argc, char *argv[]){
+    FILE *memSigOutput = fopen("sigmemory.txt", "w+");
+
     setupRegisters();
-    runPipeline(readInstructions(argv[1]));
+    if(getInputOption()) runPipeline(readInstructions(getFile()), getStepOption(), memSigOutput);
+    else runPipeline(readInstructions(NULL), getStepOption(), memSigOutput);
+
     return EXIT_SUCCESS;
 }
