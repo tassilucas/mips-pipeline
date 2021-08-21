@@ -22,6 +22,8 @@
 #define DMEM_SIZE 50
 #define MISP_REG_MAX 32
 
+#define NOP 77
+
 typedef struct {
     int next;
     uint32_t inst;
@@ -113,7 +115,7 @@ void outputMemory(FILE *out){
     fprintf(out, "$$$$$$$$$$\nImprimindo DMem\n");
     for(int i=0; i<DMEM_SIZE; i++)
         fprintf(out, "%i -> %d\n", i, DMem[i]);
-    fprintf(out, "$$$$$$$$$$\n");
+    fprintf(out, "$$$$$$$$$$\n\n");
 }
 
 void printfileReg(){
@@ -126,12 +128,12 @@ void printfileReg(){
 void printSigFetchStage(FILE *out){
     fprintf(out, "Sinais em fetch stage\n");
     fprintf(out, "PCWrite: %d\n", PCWrite);
-    fprintf(out, "IFIDWrite: %d\n", IFIDWrite);
+    fprintf(out, "IFIDWrite: %d\n\n", IFIDWrite);
 }
 
 void printSigDecStage(FILE *out){
     fprintf(out, "Sinais em decode stage\n");
-    fprintf(out, "stallSignal: %d\n", stallSignal);
+    fprintf(out, "stallSignal: %d\n\n", stallSignal);
 }
 
 void printSigExeStage(FILE *out){
@@ -149,7 +151,7 @@ void printSigExeStage(FILE *out){
     fprintf(out, "jalSig: %d\n", decExeRegRight.jalSig);
     fprintf(out, "jrSig: %d\n", decExeRegRight.jrSig);
     fprintf(out, "ForwardA: %d\n", ForwardA);
-    fprintf(out, "ForwardB: %d\n", ForwardB);
+    fprintf(out, "ForwardB: %d\n\n", ForwardB);
 }
 
 void printSigMemStage(FILE *out){
@@ -163,14 +165,14 @@ void printSigMemStage(FILE *out){
     fprintf(out, "branchDiffSig: %d\n", exeMemRegRight.branchDiffSig);
     fprintf(out, "jumpSig: %d\n", exeMemRegRight.jumpSig);
     fprintf(out, "jalSig: %d\n", exeMemRegRight.jalSig);
-    fprintf(out, "jrSig: %d\n", exeMemRegRight.jrSig);
+    fprintf(out, "jrSig: %d\n\n", exeMemRegRight.jrSig);
 }
 
 void printSigWBStage(FILE *out){
     fprintf(out, "Sinais em writeback stage\n");
     fprintf(out, "RegWrite: %d\n", memWriteRegRight.RegWrite);
     fprintf(out, "RegWrite: %d\n", memWriteRegRight.MemToReg);
-    fprintf(out, "RegWrite: %d\n", memWriteRegRight.jalSig);
+    fprintf(out, "RegWrite: %d\n\n", memWriteRegRight.jalSig);
 }
 
 uint32_t binaryToDecimal(char *bin){
@@ -224,7 +226,7 @@ void disableBranchs(){
     decExeRegLeft.jumpSig = 0;
 }
 
-void stallPipeline(){
+void nopPipeline(){
     stallSignal = 0;
     IFIDWrite = 0;
     PCWrite = 0;
@@ -244,10 +246,10 @@ void stallPipeline(){
 }
 
 void controlUnit(uint32_t binary){
-    if(stallSignal)
-        stallPipeline();
+    if(stallSignal || binary == NOP)
+        nopPipeline();
     else{
-
+        PCWrite = IFIDWrite = 1;
         unsigned char opcode = 0xFF & (binary >> 26), funct = 0x3F & binary;
 
         // jr (R-type)
@@ -370,7 +372,7 @@ void controlUnit(uint32_t binary){
     }
 }
 
-void writeBackStage(){
+bool writeBackStage(){
     printf("----------------------------------\n");
     printf("WriteBack stage: %u\n", instWBRight);
 
@@ -381,6 +383,8 @@ void writeBackStage(){
             fileReg[31] = writeData;
         else
             fileReg[memWriteRegRight.rd] = writeData;
+
+    return instWBRight == NOP ? false : true;
 }
 
 void memoryStage(){
@@ -408,8 +412,10 @@ void memoryStage(){
 
 void hazardDetectionUnit(uint32_t inst){
     uint32_t rs = 0x1F & (inst >> 21), rt = 0x1F & (inst >> 16);
-    if(((rs == decExeRegRight.rd1) || (rt == decExeRegRight.rd1)))
+    if(((rs == decExeRegRight.rd1) || (rt == decExeRegRight.rd1))){
+        printf("AHA HAZARD DETECTADO\n");
         stallSignal = 1;
+    }
 }
 
 void decodeStage(){
@@ -565,7 +571,6 @@ void executeStage(){
 
     forwardingUnit();
     int ALURes = ALU();
-    printf("ALURes = %d\n", ALURes);
 
     exeMemRegLeft.zero = ALURes == 0 ? 1 : 0;
     exeMemRegLeft.rd = decExeRegRight.RegDst ? decExeRegRight.rd2 : decExeRegRight.rd1;
@@ -585,8 +590,6 @@ void executeStage(){
     exeMemRegLeft.next = decExeRegRight.next;
 
     instMEMLeft = instEXERight;
-
-    printf("Obtained branch address: %d\n", exeMemRegLeft.branchAddress);
 }
 
 void setPC(){
@@ -616,20 +619,20 @@ bool fetchStage(int qtdInstr){
             setPC();
 
         printf("Fetched instruction: %u\n\n", fetDecRegLeft.inst);
-        printf("Proximo valor de PC: %d\n", PC);
         return true;
     }
 
-    printf("Nothing to be fetched.\n");
+    if(IFIDWrite) instDECLeft = fetDecRegLeft.inst = NOP;
+    printf("Nothing to be fetched. Inserting a nop instruction\n");
     return false;
 }
 
 void swapRegsAndInst(){
-    fetDecRegRight = fetDecRegLeft;
+    if(IFIDWrite) fetDecRegRight = fetDecRegLeft;
     decExeRegRight = decExeRegLeft;
     exeMemRegRight = exeMemRegLeft;
     memWriteRegRight = memWriteRegLeft;
-    instDECRight = instDECLeft;
+    if(IFIDWrite) instDECRight = instDECLeft;
     instEXERight = instEXELeft;
     instMEMRight = instMEMLeft;
     instWBRight = instWBLeft;
@@ -660,12 +663,15 @@ void hold(){
 
 void runPipeline(int qtdInstr, int stepMode, FILE *out){
     int inst;
+    bool wbFlag = true; // Anota status de nop em writeback stage
 
-    while(fetchStage(qtdInstr)){
+    while(wbFlag){
         printf("Clock cycle: %d\n", clockCycle++);
 
+        fetchStage(qtdInstr);
         printSigFetchStage(out);
         outputMemory(out);
+        printf("New PC Value: %d\n", PC);
 
         decodeStage();
         printSigDecStage(out);
@@ -682,37 +688,13 @@ void runPipeline(int qtdInstr, int stepMode, FILE *out){
         outputMemory(out);
         if(stepMode) hold();
 
-        writeBackStage();
+        wbFlag = writeBackStage();
         printSigWBStage(out);
         outputMemory(out);
         printfileReg();
 
         swapRegsAndInst();
-        printf("========================================================\n");
-    }
-
-    for(int i=0; i<5; i++){
-        fetchStage(qtdInstr);
-        printSigFetchStage(out);
-        outputMemory(out);
-
-        decodeStage();
-        outputMemory(out);
-        if(stepMode) hold();
-
-        executeStage();
-        outputMemory(out);
-        if(stepMode) hold();
-
-        memoryStage();
-        outputMemory(out);
-        if(stepMode) hold();
-
-        writeBackStage();
-        outputMemory(out);
-        printfileReg();
-
-        swapRegsAndInst();
+        fprintf(out, "=====================================================\n");
         printf("========================================================\n");
     }
 }
